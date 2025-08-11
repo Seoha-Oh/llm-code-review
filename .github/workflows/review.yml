@@ -1,0 +1,29 @@
+name: Reusable LLM Code Review
+on:
+  workflow_call:
+    inputs:
+      base_branch: { type: string, default: "main" }
+      model:       { type: string, default: "o4-mini" }
+    secrets:
+      OPENAI_API_KEY: { required: true }
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install requests pygments
+      - name: Run review
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          OPENAI_MODEL: ${{ inputs.model }}
+        run: python scripts/run_review.py
