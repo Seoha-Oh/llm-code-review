@@ -234,7 +234,8 @@ def numbered_section(path: str, start: int, end: int, lines=None, ctx=NUM_CTX_LI
 
 # ===== LLM 호출/리포팅 =====
 def build_messages(payload_text: str):
-    sys_prompt = pathlib.Path("scripts/prompt.md").read_text()
+    base_dir = pathlib.Path(__file__).resolve().parent  # ← 추가
+    sys_prompt = (base_dir / "prompt.md").read_text(encoding="utf-8")  # ← 경로 수정
     return [
         {"role": "system", "content": sys_prompt},
         {"role": "user",   "content": payload_text if payload_text.strip() else "변경 섹션 없음"}
