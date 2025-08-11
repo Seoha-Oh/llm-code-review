@@ -18,9 +18,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
+
+      - name: Install ctags
+        run: |
+          sudo apt-get update
+          if ! sudo apt-get install -y universal-ctags; then
+            sudo apt-get install -y ctags || sudo apt-get install -y exuberant-ctags
+          fi
+          ctags --version
+
       - run: pip install requests pygments
+
       - name: Run review
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
