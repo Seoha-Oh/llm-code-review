@@ -22,6 +22,7 @@ Please respond in Korean. Be concise and actionable.
 - When possible, provide a GitHub “suggested changes” block that contains only the replacement code:
   ```suggestion
   ...replacement code...
+  ```
 - If confidence is low or the fix spans non-adjacent ranges, either split into multiple issues or skip.
 
 [severity]
@@ -36,21 +37,21 @@ Please respond in Korean. Be concise and actionable.
 [output]
 Return JSON only (no preface/explanations; the only code block allowed is the suggested-changes block inside "suggestion"):
 {
-"diagnosis": [
-{"type":"Precondition|Runtime|Optimization|Security","count":0,"summary": "One-line summary"}
-],
-"issues": [
-{
-"file":"path/to/File.ext",
-"type":"Precondition|Runtime|Optimization|Security",
-"severity":"critical|major|minor",
-"line":123, // single-line comment
-"start_line":120, "end_line":126, // for multi-line ranges (optional)
-"reason": "Root cause and impact in 1–2 sentences.",
-"suggestion": "```suggestion\n...replacement code...\n```",
-}
-],
-"overall_summary": "Concise overall PR summary (key points only)"
+  "diagnosis": [
+    {"type":"Precondition|Runtime|Optimization|Security","count":0,"summary":"One-line summary"}
+  ],
+  "issues": [
+    {
+      "file":"path/to/File.ext",
+      "type":"Precondition|Runtime|Optimization|Security",
+      "severity":"critical|major|minor",
+      "line":123,
+      "start_line":120, "end_line":126,
+      "reason":"Root cause and impact in 1–2 sentences.",
+      "suggestion":"```suggestion\n...replacement code...\n```"
+    }
+  ],
+  "overall_summary":"Concise overall PR summary (key points only)"
 }
 
 [input-format]
