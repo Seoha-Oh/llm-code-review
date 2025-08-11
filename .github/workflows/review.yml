@@ -24,7 +24,7 @@ jobs:
       - name: Checkout tool repo (central)
         uses: actions/checkout@v4
         with:
-          repository: your-org/llm-review-central   # ← 중앙 리포 '명시'
+          repository: seoha8952/llm-code-review   # ← 중앙 리포 '명시'
           ref: v1                                    # ← 태그로 고정(권장)
           path: _llm                                 # 서브폴더
 
