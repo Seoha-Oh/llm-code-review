@@ -16,8 +16,17 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
+      # ① 호출한(대상) 리포 체크아웃 — diff 계산용
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+
+      # ② 중앙 리포(스크립트 있는 곳) 체크아웃 — 실행용
+      - name: Checkout tool repo (central)
+        uses: actions/checkout@v4
+        with:
+          repository: your-org/llm-review-central   # ← 중앙 리포 '명시'
+          ref: v1                                    # ← 태그로 고정(권장)
+          path: _llm                                 # 서브폴더
 
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
@@ -30,11 +39,11 @@ jobs:
           fi
           ctags --version
 
-      - run: pip install requests pygments
+      - run: pip install requests
 
       - name: Run review
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           BASE_BRANCH: ${{ inputs.base_branch }}
           OPENAI_MODEL: ${{ inputs.model }}
-        run: python scripts/run_review.py
+        run: python _llm/scripts/run_review.py      # ← 중앙 리포 경로에서 실행
