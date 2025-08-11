@@ -43,6 +43,7 @@ jobs:
 
       - name: Run review
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           BASE_BRANCH: ${{ inputs.base_branch }}
           OPENAI_MODEL: ${{ inputs.model }}
