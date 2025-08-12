@@ -243,15 +243,32 @@ def build_messages(payload_text: str):
 
 def call_openai(messages):
     model = MODEL
-    use_responses = model.startswith("o4")  # o4, o4-mini 계열
+    use_responses = model.startswith("o4")  # o4, o4-mini
 
     if use_responses:
+        # messages -> 단일 문자열로 변환
+        def as_prompt_string(ms):
+            parts = []
+            for m in ms:
+                role = m.get("role", "user")
+                parts.append(f"<{role.upper()}>\n{m['content']}\n</{role.upper()}>")
+            # JSON 스키마를 끝에 다시 한번 못 박아줌(느슨한 모델에도 효과적)
+            parts.append(
+                "\n[FORMAT]\n"
+                "반드시 아래 JSON 스키마로만 출력:\n"
+                '{ "diagnosis": [ { "type": "string", "count": 0, "summary": "string" } ],'
+                '  "issues": [ { "type": "string", "severity": "minor|major|critical",'
+                '                "file": "string", "line": 0, "start_line": 0, "end_line": 0,'
+                '                "reason": "string", "suggestion": "string" } ],'
+                '  "overall_summary": "string" }\n'
+            )
+            return "\n".join(parts)
+
         url = "https://api.openai.com/v1/responses"
         payload = {
             "model": model,
-            "input": messages,              # system/user 메시지 배열 그대로 OK
-            "max_output_tokens": 1200,      # <-- responses 전용 이름
-            # "temperature": 0.2,           # <-- 넣으면 400! (삭제)
+            "input": as_prompt_string(messages),   # ← 단일 문자열
+            "max_output_tokens": 1200,             # temperature 넣지 말 것
         }
     else:
         url = "https://api.openai.com/v1/chat/completions"
@@ -272,7 +289,7 @@ def call_openai(messages):
         timeout=180,
     )
 
-    # 에러 바디 로깅(원인 확인용)
+    # 에러 바디 로깅
     if r.status_code != 200:
         try:
             err = r.json()
@@ -282,14 +299,10 @@ def call_openai(messages):
         r.raise_for_status()
 
     data = r.json()
-
-    # 응답 파싱
     if use_responses:
-        try:
-            content = data["output"][0]["content"][0]["text"]
-        except Exception:
-            # 안전 fallback
-            content = data.get("output_text") or json.dumps(data, ensure_ascii=False)
+        content = data.get("output_text") \
+               or (data.get("output") and data["output"][0]["content"][0]["text"]) \
+               or json.dumps(data, ensure_ascii=False)
     else:
         content = data["choices"][0]["message"]["content"]
 
@@ -298,6 +311,7 @@ def call_openai(messages):
     try:
         return json.loads(content[start:end+1])
     except Exception:
+        # 무엇이 왔는지 추적할 수 있게 원문을 넣어 반환
         return {"diagnosis": [], "issues": [], "overall_summary": content}
 
 def post_summary(body: str):
@@ -351,20 +365,21 @@ def build_payload_all_at_once(hunks_by_file):
     return "\n\n".join(blocks)[:MAX_PAYLOAD_CHARS]
 
 def per_file_calls(hunks_by_file):
-    """파일별로 나눠 여러 번 호출(대형 PR/신규 큰 파일에 유리)"""
     all_issues, all_diag = [], []
+    texts_for_log = []  # ← 추가
+
     for path, hunks in hunks_by_file.items():
         secs = sections_for_file(path, hunks)
         if not secs:
             continue
-        # 너무 크면 조각내어 여러 번 호출
-        batch = []
-        size = 0
+        batch, size = [], 0
         for (_, s, e), text in secs:
             if size + len(text) > MAX_PAYLOAD_CHARS and batch:
                 res = call_openai(build_messages("\n\n".join(batch)))
                 all_diag += res.get("diagnosis", [])
                 all_issues += res.get("issues", [])
+                if res.get("overall_summary"):
+                    texts_for_log.append(f"### {path}\n{res['overall_summary']}")
                 batch = [text]; size = len(text)
             else:
                 batch.append(text); size += len(text)
@@ -372,6 +387,16 @@ def per_file_calls(hunks_by_file):
             res = call_openai(build_messages("\n\n".join(batch)))
             all_diag += res.get("diagnosis", [])
             all_issues += res.get("issues", [])
+            if res.get("overall_summary"):
+                texts_for_log.append(f"### {path}\n{res['overall_summary']}")
+
+    # 요약 코멘트에 overall_summary 모음도 덧붙여 보기
+    if texts_for_log:
+        try:
+            post_summary("#### Raw summaries (debug)\n" + "\n\n".join(texts_for_log)[:6000])
+        except Exception:
+            pass
+
     return all_diag, all_issues
 
 def main():
