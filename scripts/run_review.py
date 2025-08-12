@@ -246,29 +246,23 @@ def call_openai(messages):
     use_responses = model.startswith("o4")  # o4, o4-mini
 
     if use_responses:
-        # messages -> 단일 문자열로 변환
-        def as_prompt_string(ms):
+        url = "https://api.openai.com/v1/responses"
+        # messages -> 문자열 프롬프트(권장)
+        def to_prompt(ms):
             parts = []
             for m in ms:
                 role = m.get("role", "user")
-                parts.append(f"<{role.upper()}>\n{m['content']}\n</{role.upper()}>")
-            # JSON 스키마를 끝에 다시 한번 못 박아줌(느슨한 모델에도 효과적)
+                parts.append(f"<{role.upper()}>\n{m['content']}\n</{role.UPPER() if False else 'UPPER'}>")
             parts.append(
                 "\n[FORMAT]\n"
-                "반드시 아래 JSON 스키마로만 출력:\n"
-                '{ "diagnosis": [ { "type": "string", "count": 0, "summary": "string" } ],'
-                '  "issues": [ { "type": "string", "severity": "minor|major|critical",'
-                '                "file": "string", "line": 0, "start_line": 0, "end_line": 0,'
-                '                "reason": "string", "suggestion": "string" } ],'
-                '  "overall_summary": "string" }\n'
+                'JSON only: {"diagnosis": [], "issues": [], "overall_summary": ""}\n'
             )
             return "\n".join(parts)
 
-        url = "https://api.openai.com/v1/responses"
         payload = {
             "model": model,
-            "input": as_prompt_string(messages),   # ← 단일 문자열
-            "max_output_tokens": 1200,             # temperature 넣지 말 것
+            "input": to_prompt(messages),
+            "max_output_tokens": 1200,   # temperature 넣지 말기
         }
     else:
         url = "https://api.openai.com/v1/chat/completions"
@@ -289,7 +283,6 @@ def call_openai(messages):
         timeout=180,
     )
 
-    # 에러 바디 로깅
     if r.status_code != 200:
         try:
             err = r.json()
@@ -299,19 +292,43 @@ def call_openai(messages):
         r.raise_for_status()
 
     data = r.json()
+
+    # ---- 여기부터 안전 파서 ----
+    def _extract_text_from_responses(d):
+        # 1) 가장 안정적인 단일 필드
+        if isinstance(d, dict) and d.get("output_text"):
+            return d["output_text"]
+
+        # 2) output[*].content[*].text 형태 탐색
+        try:
+            for msg in d.get("output", []) or []:
+                for part in msg.get("content", []) or []:
+                    t = part.get("text")
+                    if t:
+                        return t
+        except Exception:
+            pass
+
+        # 3) 혹시 choices 형태로 온 경우(백엔드 라우팅 차이 대응)
+        try:
+            return d["choices"][0]["message"]["content"]
+        except Exception:
+            pass
+
+        # 4) 완전 실패 시 원문 반환(디버깅용)
+        return json.dumps(d, ensure_ascii=False)
+
     if use_responses:
-        content = data.get("output_text") \
-               or (data.get("output") and data["output"][0]["content"][0]["text"]) \
-               or json.dumps(data, ensure_ascii=False)
+        content = _extract_text_from_responses(data)
     else:
         content = data["choices"][0]["message"]["content"]
 
-    # 방어적 JSON 파싱
+    # ---- 방어적 JSON 파싱 ----
     start = content.find("{"); end = content.rfind("}")
     try:
         return json.loads(content[start:end+1])
     except Exception:
-        # 무엇이 왔는지 추적할 수 있게 원문을 넣어 반환
+        # 무엇이 왔는지 보이게 전체를 summary로
         return {"diagnosis": [], "issues": [], "overall_summary": content}
 
 def post_summary(body: str):
