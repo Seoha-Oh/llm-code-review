@@ -362,24 +362,53 @@ def post_inline(issues: list):
     url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUM}/comments"
     headers = {"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
                "Accept":"application/vnd.github+json"}
+
+    posted = 0
+    skipped = []
+
     for it in issues[:60]:
         path = it.get("file")
         line = it.get("line")
         sline = it.get("start_line")
         eline = it.get("end_line", line)
+
+        # 필수 필드 검증 + 섹션 범위 밖 방지(LLM이 실수하는 경우)
         if not path or (not line and not sline):
+            skipped.append({"reason":"missing path/line", "item":it})
             continue
+
         title = f"**{it.get('type','Issue')} ({it.get('severity','minor')})**"
         reason = it.get("reason","")
         suggestion = it.get("suggestion","")
         body = f"{title}\n{reason}\n\n{suggestion}"
+
         payload = {"body": body, "path": path, "side":"RIGHT", "commit_id": HEAD_SHA}
         if sline:
             payload["start_line"] = int(sline)
             payload["line"] = int(eline)
         else:
             payload["line"] = int(line)
-        requests.post(url, headers=headers, json=payload).raise_for_status()
+
+        r = requests.post(url, headers=headers, json=payload)
+        if r.status_code == 201:
+            posted += 1
+        else:
+            try:
+                err = r.json()
+            except Exception:
+                err = {"text": r.text}
+            skipped.append({"reason":"github api", "status": r.status_code, "error": err, "payload": payload})
+
+    # 결과 요약을 PR 코멘트로 남겨 디버깅
+    try:
+        post_summary(
+            "#### Inline post result\n"
+            f"- posted: {posted}\n"
+            f"- skipped: {len(skipped)}\n"
+            + (("\n```json\n" + json.dumps(skipped, ensure_ascii=False, indent=2)[:5500] + "\n```") if skipped else "")
+        )
+    except Exception:
+        pass
 
 def summarize_diag(diag: list):
     if not diag: 
@@ -401,42 +430,35 @@ def build_payload_all_at_once(hunks_by_file):
 
 def per_file_calls(hunks_by_file):
     all_issues, all_diag = [], []
-    debug_notes = []  # 섹션별 원문 응답 저장
+    debug_notes = []
 
     for path, hunks in hunks_by_file.items():
         secs = sections_for_file(path, hunks)
-        if not secs: continue
+        if not secs:
+            continue
 
-        batch, size = [], 0
+        # --- 섹션별로 바로 호출 (배치 X) ---
         for (_, s, e), text in secs:
-            if size + len(text) > MAX_PAYLOAD_CHARS and batch:
-                parsed, raw = call_openai(build_messages("\n\n".join(batch)))
-                all_diag += parsed.get("diagnosis", [])
-                all_issues += parsed.get("issues", [])
-                if parsed.get("overall_summary"):
-                    debug_notes.append(f"### {path} ({len(batch)} chunk)\n{parsed['overall_summary']}")
-                else:
-                    debug_notes.append(f"### {path} (RAW)\n```\n{raw[:3000]}\n```")
-                batch, size = [text], len(text)
-            else:
-                batch.append(text); size += len(text)
+            parsed, raw = call_openai(build_messages(text))
 
-        if batch:
-            parsed, raw = call_openai(build_messages("\n\n".join(batch)))
+            # 디버그: 섹션, 진단/이슈 개수 표시
+            debug_notes.append(
+                f"### {path}:{s}~{e}\n"
+                f"- diagnosis: {len(parsed.get('diagnosis', []))}\n"
+                f"- issues: {len(parsed.get('issues', []))}\n"
+            )
+
             all_diag += parsed.get("diagnosis", [])
             all_issues += parsed.get("issues", [])
-            if parsed.get("overall_summary"):
-                debug_notes.append(f"### {path} ({len(batch)} chunk)\n{parsed['overall_summary']}")
-            else:
-                debug_notes.append(f"### {path} (RAW)\n```\n{raw[:3000]}\n```")
 
-    # 섹션별 원문/요약을 한 번 더 코멘트
+    # 섹션별 카운트만 짧게 코멘트
     try:
-        post_summary("#### 🤖 LLM raw outputs (debug)\n" + "\n\n".join(debug_notes)[:6000])
+        post_summary("#### LLM section counts (debug)\n" + "\n".join(debug_notes)[:6000])
     except Exception:
         pass
 
     return all_diag, all_issues
+
 
 def main():
     diff = get_diff_unified0()
@@ -461,10 +483,9 @@ def main():
         post_inline(issues)
     else:
         payload = build_payload_all_at_once(hunks_by_file)
-        result = call_openai(build_messages(payload))
-        post_summary("### 🤖 LLM Code Review 요약\n" + summarize_diag(result.get("diagnosis", [])) + 
-                     "\n\n---\n" + result.get("overall_summary",""))
-        post_inline(result.get("issues", []))
+        parsed, raw = call_openai(build_messages(payload))
+        post_summary("### 🤖 LLM Code Review 요약\n" + summarize_diag(parsed.get("diagnosis", [])) +"\n\n---\n" + parsed.get("overall_summary",""))
+        post_inline(parsed.get("issues", []))
 
 if __name__ == "__main__":
     try:
