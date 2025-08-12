@@ -37,21 +37,13 @@ Please respond in Korean. Be concise and actionable.
 [output]
 Return JSON only (no preface/explanations; the only code block allowed is the suggested-changes block inside "suggestion"):
 {
-  "diagnosis": [
-    {"type":"Precondition|Runtime|Optimization|Security","count":0,"summary":"One-line summary"}
-  ],
+  "diagnosis": [ { "type": "string", "count": 0, "summary": "string" } ],
   "issues": [
-    {
-      "file":"path/to/File.ext",
-      "type":"Precondition|Runtime|Optimization|Security",
-      "severity":"critical|major|minor",
-      "line":123,
-      "start_line":120, "end_line":126,
-      "reason":"Root cause and impact in 1–2 sentences.",
-      "suggestion":"```suggestion\n...replacement code...\n```"
-    }
+    { "type": "string", "severity": "minor|major|critical",
+      "file": "string", "line": 0, "start_line": 0, "end_line": 0,
+      "reason": "string", "suggestion": "string" }
   ],
-  "overall_summary":"Concise overall PR summary (key points only)"
+  "overall_summary": "string"
 }
 
 [input-format]
