@@ -168,27 +168,40 @@ def split_with_overlap(start: int, end: int, max_lines=MAX_LINES_PER_SECTION, ov
         if pe == end: break
         cur = max(pe - overlap + 1, pe + 1)
 
-def expand_range_for_decls(path: str, func_start: int, func_end: int, total_lines: int):
+def expand_range_for_decls(path: str,
+                           func_start: int,
+                           func_end: int,
+                           total_lines: int,
+                           func_ranges: list):
     """
-    함수 경계로부터 위쪽 선언/필드/임포트 컨텍스트를 포함하도록 시작 지점 확장.
-    - 클래스 내부면 클래스 시작 또는 함수 시작-컨텍스트 중 더 아래를 사용.
-    - 모듈/파일 상단 변수/임포트는 첫 함수 이전 구간에 있을 가능성이 커서,
-      함수 시작 위로 FUNC_CTX_BEFORE 만큼 확장.
+    - 함수 시작 위로 FUNC_CTX_BEFORE 줄 확장 (선언/임포트 맥락)
+    - 클래스 내부면 클래스 시작 이전으로는 확장 금지
+    - **이전 함수의 끝(fe) 이전으로는 확장 금지**  ← 핵심
     """
     cls_start = enclosing_class_start(path, func_start, total_lines)
+
+    # 기본 앵커: 함수 시작 위로 N줄
     anchor = func_start - FUNC_CTX_BEFORE
+
+    # 클래스 범위 존중
     if cls_start:
         anchor = max(cls_start, anchor)
-    start = max(1, anchor)
+
+    # 바로 이전 함수의 끝 찾기 (있으면 그 다음 줄부터 시작)
+    prev_func_end = 0
+    for fs, fe in func_ranges:
+        if fe < func_start and fe > prev_func_end:
+            prev_func_end = fe
+
+    start = max(1, anchor, prev_func_end + 1)
     end = func_end
     return (start, end)
 
 def sections_for_file(path: str, hunks_for_file: list):
     """
-    주어진 파일에 대해:
     - ctags 함수 범위가 있으면 → hunk와 겹치는 함수 단위로 섹션 생성
     - 없으면 → hunk 범위를 윈도우 분할
-    각 섹션은 추가 context(NUM_CTX_LINES)를 양 옆으로 포함해 넘버링.
+    - 생성 후 **포함/중복 섹션 제거**로 겹침 최소화
     """
     if not os.path.exists(path):
         return []
@@ -197,35 +210,49 @@ def sections_for_file(path: str, hunks_for_file: list):
     total = len(lines)
     func_ranges = function_ranges_with_ctags(path, total)
 
-    # hunk들 합쳐서(신규 파일이면 사실상 1~끝) → 함수와 교집합 계산
     merged = merge_intervals(hunks_for_file)
-
     sections = []
 
     if func_ranges:
         for hs, he in merged:
             for fs, fe in func_ranges:
                 if intervals_overlap(hs, he, fs, fe):
-                    # 선언/필드 포함하도록 위쪽 확장
-                    es, ee = expand_range_for_decls(path, fs, fe, total)
-                    # 너무 크면 오버랩 분할
+                    # 이전 함수 경계 고려하여 확장
+                    es, ee = expand_range_for_decls(path, fs, fe, total, func_ranges)
+                    # 필요 시 분할
                     for ps, pe in split_with_overlap(es, ee):
                         sec = numbered_section(path, ps, pe, lines, ctx=NUM_CTX_LINES)
                         if sec:
                             sections.append((path, ps, pe, sec))
     else:
-        # 함수 정보 없으면 hunk 자체를 안전 분할
         for hs, he in merged:
             for ps, pe in split_with_overlap(hs, he):
                 sec = numbered_section(path, ps, pe, lines, ctx=NUM_CTX_LINES)
                 if sec:
                     sections.append((path, ps, pe, sec))
 
-    # 중복 제거(동일 범위)
-    uniq = {}
+    # -------- 포함/중복 제거 --------
+    # 같은 파일 내에서 start/end 기준 정렬
+    sections.sort(key=lambda x: (x[0], x[1], x[2]))
+
+    pruned = []
     for p, s, e, t in sections:
+        # 1) 이미 동일 구간 있으면 스킵
+        if any(pp == p and ss == s and ee == e for (pp, ss, ee, _) in pruned):
+            continue
+        # 2) 더 큰 구간이 이미 포함하고 있으면 스킵 (s~e가 기존에 포함됨)
+        if any(pp == p and ss <= s and e <= ee for (pp, ss, ee, _) in pruned):
+            continue
+        # 3) 반대로, 내가 기존 구간을 완전히 포함하면 기존 것을 제거하고 나를 넣기
+        pruned = [(pp, ss, ee, tt) for (pp, ss, ee, tt) in pruned
+                  if not (pp == p and s <= ss and ee <= e)]
+        pruned.append((p, s, e, t))
+
+    # 반환 형태 맞추기: [((path,start,end), section_text), ...]
+    uniq = {}
+    for p, s, e, t in pruned:
         uniq[(p, s, e)] = t
-    return list(uniq.items())  # [((path, start, end), section_text), ...]
+    return list(uniq.items())
 
 def intervals_overlap(a1, a2, b1, b2):
     return not (a2 < b1 or b2 < a1)
