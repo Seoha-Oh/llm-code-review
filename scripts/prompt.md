@@ -35,16 +35,17 @@ Please respond in Korean. Be concise and actionable.
 - Sort issues by severity (critical → major → minor) and by file/line.
 
 [output]
+Use only file and line values that fall strictly within the file/start~end range of the section.
 Return JSON only (no preface/explanations; the only code block allowed is the suggested-changes block inside "suggestion"):
 {
-  "diagnosis": [ { "type": "string", "count": 0, "summary": "string" } ],
-  "issues": [
-    { "type": "string", "severity": "minor|major|critical",
-      "file": "string", "line": 0, "start_line": 0, "end_line": 0,
-      "reason": "string", "suggestion": "string" }
-  ],
-  "overall_summary": "string"
+  "diagnosis": [ { "type":"string", "count":0, "summary":"string" } ],
+  "issues": [ { "type":"string", "severity":"minor|major|critical",
+    "file":"string", "line":0, "start_line":0, "end_line":0,
+    "reason":"string",
+    "suggestion":"string" } ],
+  "overall_summary":"string"
 }
+
 
 [input-format]
 You will receive one or more sections like:
