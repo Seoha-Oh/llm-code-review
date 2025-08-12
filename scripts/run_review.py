@@ -18,7 +18,7 @@ PR_NUM = EVENT["pull_request"]["number"]
 HEAD_SHA = EVENT["pull_request"]["head"]["sha"]
 
 BASE_BRANCH = os.getenv("BASE_BRANCH", "main")
-MODEL       = os.getenv("OPENAI_MODEL", "o4-mini")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # 섹션/맥락 파라미터(필요시 워크플로우에서 ENV로 조정)
 MAX_LINES_PER_SECTION = int(os.getenv("MAX_LINES_PER_SECTION", "220"))  # 한 섹션 최대 라인 수
