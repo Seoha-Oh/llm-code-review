@@ -47,5 +47,5 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           BASE_BRANCH: ${{ inputs.base_branch }}
           OPENAI_MODEL: ${{ inputs.model }}
-          SECTIONS_DEBUG: "1"
+          SECTIONS_DEBUG: "0"
         run: python _llm/scripts/run_review.py      # ← 중앙 리포 경로에서 실행
