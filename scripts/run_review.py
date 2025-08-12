@@ -243,20 +243,18 @@ def build_messages(payload_text: str):
 
 def call_openai(messages):
     model = MODEL
-
-    # o4/o4-mini 계열은 responses API, 그 외는 chat/completions 사용
-    use_responses = model.startswith("o4")
-    url = "https://api.openai.com/v1/responses" if use_responses else "https://api.openai.com/v1/chat/completions"
+    use_responses = model.startswith("o4")  # o4, o4-mini 계열
 
     if use_responses:
+        url = "https://api.openai.com/v1/responses"
         payload = {
             "model": model,
-            # messages 그대로 넣어도 됩니다(Responses는 input에 문자열/구조화 모두 허용)
-            "input": messages,
-            "temperature": 0.2,
-            "max_output_tokens": 1200,
+            "input": messages,              # system/user 메시지 배열 그대로 OK
+            "max_output_tokens": 1200,      # <-- responses 전용 이름
+            # "temperature": 0.2,           # <-- 넣으면 400! (삭제)
         }
     else:
+        url = "https://api.openai.com/v1/chat/completions"
         payload = {
             "model": model,
             "messages": messages,
@@ -274,43 +272,28 @@ def call_openai(messages):
         timeout=180,
     )
 
-    # ---- 에러 바디 로깅(가장 중요) ----
+    # 에러 바디 로깅(원인 확인용)
     if r.status_code != 200:
         try:
             err = r.json()
         except Exception:
             err = {"text": r.text}
-        # GitHub Actions 로그에 원인 남기기
         print("OpenAI API error:", r.status_code, json.dumps(err, ensure_ascii=False)[:4000])
-        # PR 코멘트로도 원인 공유
-        try:
-            post_summary(f"LLM 호출 실패: {r.status_code}\n\n```json\n{json.dumps(err, ensure_ascii=False, indent=2)[:6000]}\n```")
-        except Exception:
-            pass
         r.raise_for_status()
 
     data = r.json()
 
-    # ---- 응답 파싱 분기 ----
+    # 응답 파싱
     if use_responses:
-        # Responses API 응답 구조에서 텍스트 꺼내기(안전하게)
-        out = data.get("output") or data.get("response") or data.get("choices")
-        if isinstance(out, list):
-            # output[0].content[0].text 형태 시도
-            try:
-                content = out[0]["content"][0]["text"]
-            except Exception:
-                # choices[0].message.content 형태 호환
-                try:
-                    content = out[0]["message"]["content"]
-                except Exception:
-                    content = json.dumps(data, ensure_ascii=False)
-        else:
-            content = json.dumps(data, ensure_ascii=False)
+        try:
+            content = data["output"][0]["content"][0]["text"]
+        except Exception:
+            # 안전 fallback
+            content = data.get("output_text") or json.dumps(data, ensure_ascii=False)
     else:
         content = data["choices"][0]["message"]["content"]
 
-    # ---- 방어적 JSON 파싱 ----
+    # 방어적 JSON 파싱
     start = content.find("{"); end = content.rfind("}")
     try:
         return json.loads(content[start:end+1])
