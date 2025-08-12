@@ -428,37 +428,99 @@ def build_payload_all_at_once(hunks_by_file):
             blocks.append(sec)
     return "\n\n".join(blocks)[:MAX_PAYLOAD_CHARS]
 
+def extract_plain_code_from_section(section_text: str) -> str:
+    """<SECTION ...> ~ </SECTION> 사이의 본문에서 'N: ' 라인번호 접두를 제거해 순수 코드만 반환"""
+    lines = section_text.splitlines()
+    # 본문 구간 찾기
+    try:
+        start_idx = next(i for i, ln in enumerate(lines) if ln.startswith("<SECTION "))
+        end_idx   = len(lines) - 1 - next(i for i, ln in enumerate(reversed(lines)) if ln.strip() == "</SECTION>")
+    except StopIteration:
+        body = lines
+    else:
+        body = lines[start_idx+1:end_idx]
+
+    plain = []
+    for ln in body:
+        # "  12: code" 혹은 "12:code" 형태 제거
+        m = re.match(r"^\s*\d+:\s?(.*)$", ln)
+        plain.append(m.group(1) if m else ln)
+    return "\n".join(plain)
+
+def format_section_card_md(path: str, s: int, e: int, section_text: str, parsed: dict) -> str:
+    code_block = extract_plain_code_from_section(section_text)
+
+    # 이 섹션 범위(s~e) 안의 이슈만 선별
+    issues = []
+    for it in parsed.get("issues", []) or []:
+        if (it.get("file") == path) and (
+            (it.get("line") and s <= int(it["line"]) <= e) or
+            (it.get("start_line") and it.get("end_line") and
+             not (int(it["end_line"]) < s or e < int(it["start_line"])))
+        ):
+            issues.append(it)
+
+    # 이슈 목록을 간단한 글머리표로
+    if issues:
+        issues_md = "\n".join(
+            f"- **{it.get('type','Issue')}** ({it.get('severity','minor')}) "
+            f"@ L{it.get('start_line', it.get('line'))}"
+            f"{'-L'+str(it['end_line']) if it.get('start_line') else ''} — {it.get('reason','')}"
+            for it in issues
+        )
+        # 가장 첫 제안만 아래에 붙이되, suggestion이 있으면 그대로 출력
+        first_sugg = next((it.get("suggestion") for it in issues if it.get("suggestion")), "")
+    else:
+        issues_md = "_No issues detected in this section._"
+        first_sugg = ""
+
+    # 섹션 카드 마크다운
+    md = []
+    md.append(f"### `{path}` {s}–{e}")
+    md.append("")
+    md.append("```python")
+    md.append(code_block)
+    md.append("```")
+    md.append("")
+    md.append("**Findings**")
+    md.append(issues_md)
+    if first_sugg:
+        md.append("\n**Suggested change**\n" + first_sugg)
+    return "\n".join(md)
+
 def per_file_calls(hunks_by_file):
     all_issues, all_diag = [], []
-    debug_notes = []
+    section_cards = []   # ← 리뷰 카드에 들어갈 섹션별 블록
 
     for path, hunks in hunks_by_file.items():
         secs = sections_for_file(path, hunks)
         if not secs:
             continue
 
-        # --- 섹션별로 바로 호출 (배치 X) ---
-        for (_, s, e), text in secs:
-            parsed, raw = call_openai(build_messages(text))
+        for (_, s, e), section_text in secs:
+            parsed, raw = call_openai(build_messages(section_text))
 
-            # 디버그: 섹션, 진단/이슈 개수 표시
-            debug_notes.append(
-                f"### {path}:{s}~{e}\n"
-                f"- diagnosis: {len(parsed.get('diagnosis', []))}\n"
-                f"- issues: {len(parsed.get('issues', []))}\n"
+            # 섹션 카드 조립
+            section_cards.append(
+                format_section_card_md(path, s, e, section_text, parsed)
             )
 
-            all_diag += parsed.get("diagnosis", [])
+            # 인라인/요약 집계는 그대로
+            all_diag  += parsed.get("diagnosis", [])
             all_issues += parsed.get("issues", [])
 
-    # 섹션별 카운트만 짧게 코멘트
-    try:
-        post_summary("#### LLM section counts (debug)\n" + "\n".join(debug_notes)[:6000])
-    except Exception:
-        pass
+    # 📌 PR 상단 리뷰 카드로 섹션별 블록 묶어서 게시
+    if section_cards:
+        try:
+            post_review_summary(
+                "## 🤖 LLM Code Review (by section)\n"
+                + "\n\n---\n\n".join(section_cards)
+            )
+        except Exception:
+            # 실패하더라도 리뷰 전체는 계속 진행
+            pass
 
     return all_diag, all_issues
-
 
 def main():
     diff = get_diff_unified0()
