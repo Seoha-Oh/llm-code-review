@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
 run_review.py
-- PR diff를 파일/함수 경계로 쪼개 LLM에 보내고, 결과를 요약 + 인라인 코멘트로 게시
-- 가시성 개선:
-  1) PR 상단 요약 코멘트는 '업서트'로 단 한 개만 유지 (배지/표/체크리스트)
-  2) 인라인 코멘트는 모두 게시하되 Review API로 한 번에 제출(알림 1회)
-  3) diff 밖 라인은 인라인 대신 요약에 'Out-of-diff findings'로 모아 안내
+- PR diff를 함수/메서드 경계 기준 섹션으로 나눠 LLM에 전달
+- 결과를 인라인 코멘트(변경 라인만) + PR 상단 요약(업서트)로 게시
+- 요약 형식: Diagnosis(룰별 개수/요약) → Next Actions(체크리스트) → Out-of-diff
+- 하드코딩된 룰 설명은 사용하지 않음(LLM 응답의 diagnosis.summary만 사용)
 """
 
 import os, re, json, subprocess, requests, pathlib, sys
 from collections import defaultdict
 
-# ===== 환경 변수 =====
+# ===== GitHub / 모델 설정 =====
 REPO = os.getenv("GITHUB_REPOSITORY")
 EVENT = json.load(open(os.getenv("GITHUB_EVENT_PATH")))
 PR_NUM = EVENT["pull_request"]["number"]
@@ -21,7 +21,7 @@ HEAD_SHA = EVENT["pull_request"]["head"]["sha"]
 BASE_BRANCH = os.getenv("BASE_BRANCH", "main")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# 섹션/맥락 파라미터
+# ===== 섹션/맥락 파라미터 =====
 MAX_LINES_PER_SECTION = int(os.getenv("MAX_LINES_PER_SECTION", "220"))
 OVERLAP_LINES         = int(os.getenv("OVERLAP_LINES", "10"))
 FUNC_CTX_BEFORE       = int(os.getenv("FUNC_CTX_BEFORE", "16"))
@@ -29,7 +29,7 @@ NUM_CTX_LINES         = int(os.getenv("NUM_CTX_LINES", "6"))
 MAX_PAYLOAD_CHARS     = int(os.getenv("MAX_PAYLOAD_CHARS", "180000"))
 PER_FILE_CALL         = os.getenv("PER_FILE_CALL", "true").lower() == "true"
 
-# ===== 유틸 =====
+# ===== 공통 유틸 =====
 def sh(*cmd: str) -> str:
     return subprocess.check_output(list(cmd), text=True).strip()
 
@@ -38,7 +38,9 @@ def get_diff_unified0() -> str:
     return subprocess.check_output(["git","diff",f"{base}...HEAD","--unified=0"], text=True)
 
 def parse_hunks(diff: str):
-    """@@ -a,b +c,d @@ 블록을 파싱해 (path, start, end) 리스트 생성"""
+    """
+    @@ -a,b +c,d @@ 블록을 파싱 → (path, start, end) 리스트
+    """
     sections = []
     cur_file = None
     for line in diff.splitlines():
@@ -57,7 +59,7 @@ def load_lines(path: str):
     text = pathlib.Path(path).read_text(encoding="utf-8", errors="ignore")
     return text.splitlines()
 
-# ===== ctags 기반 심볼 수집 =====
+# ===== ctags 기반 심볼 =====
 def have_ctags() -> bool:
     try:
         subprocess.check_output(["ctags", "--version"])
@@ -73,7 +75,7 @@ def ctags_symbols(path: str):
     symbols = []
     for line in out.splitlines():
         m = re.match(r"(\S+)\s+(\S+)\s+(\d+)\s+(.*)$", line)
-        if not m: 
+        if not m:
             continue
         name, kind, lno, _ = m.groups()
         try:
@@ -118,7 +120,7 @@ def enclosing_class_start(path: str, line: int, total_lines: int):
             return cs
     return None
 
-# ===== 분할/확장 로직 =====
+# ===== 분할/확장 =====
 def split_with_overlap(start: int, end: int, max_lines=MAX_LINES_PER_SECTION, overlap=OVERLAP_LINES):
     n = end - start + 1
     if n <= max_lines:
@@ -133,9 +135,9 @@ def split_with_overlap(start: int, end: int, max_lines=MAX_LINES_PER_SECTION, ov
 
 def expand_range_for_decls(path: str, func_start: int, func_end: int, total_lines: int, func_ranges: list):
     """
-    - 함수 시작 위로 FUNC_CTX_BEFORE 줄 확장 (선언/임포트 맥락)
+    - 함수 시작 위로 FUNC_CTX_BEFORE줄 확장
     - 클래스 내부면 클래스 시작 이전으로 확장 금지
-    - 이전 함수의 끝 이전으로 확장 금지
+    - 바로 이전 함수의 끝 이전으로 확장 금지
     """
     cls_start = enclosing_class_start(path, func_start, total_lines)
     anchor = func_start - FUNC_CTX_BEFORE
@@ -166,7 +168,6 @@ def merge_intervals(spans):
     return merged
 
 def numbered_section(path: str, start: int, end: int, lines=None, ctx=NUM_CTX_LINES):
-    """라인 번호 포함 섹션(컨텍스트 ±ctx 포함)"""
     try:
         if lines is None:
             lines = load_lines(path)
@@ -220,7 +221,7 @@ def sections_for_file(path: str, hunks_for_file: list):
         uniq[(p, s, e)] = t
     return list(uniq.items())
 
-# ===== LLM 호출/리포팅 =====
+# ===== LLM 호출 =====
 def build_messages(payload_text: str):
     base_dir = pathlib.Path(__file__).resolve().parent
     sys_prompt = (base_dir / "prompt.md").read_text(encoding="utf-8")
@@ -283,6 +284,7 @@ def call_openai(messages):
         parsed = {"diagnosis": [], "issues": [], "overall_summary": content}
     return parsed, content
 
+# ===== GitHub 포스팅 =====
 def post_summary(body: str):
     url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUM}/comments"
     requests.post(url,
@@ -291,35 +293,43 @@ def post_summary(body: str):
         json={"body": body}
     ).raise_for_status()
 
-# === Summary Upsert ===
 SUMMARY_TAG = "<!-- LLM-CODE-REVIEW-SUMMARY -->"
 
 def upsert_summary_comment(body: str):
-    """기존 요약(있으면 PATCH, 없으면 POST) — 요약 코멘트를 한 개만 유지"""
-    list_url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUM}/comments"
+    """
+    PR에 요약 코멘트를 하나만 유지(업서트).
+    PATCH 경로는 반드시 /issues/comments/:id 여야 함.
+    """
+    base = f"https://api.github.com/repos/{REPO}"
     headers = {"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
                "Accept":"application/vnd.github+json"}
 
+    list_url = f"{base}/issues/{PR_NUM}/comments"
     r = requests.get(list_url, headers=headers)
     r.raise_for_status()
     comments = r.json() or []
 
     target = next((c for c in reversed(comments)
-                   if isinstance(c.get("body"), str)
-                   and SUMMARY_TAG in c["body"]), None)
+                   if isinstance(c.get("body"), str) and SUMMARY_TAG in c["body"]), None)
 
     body_with_tag = body + f"\n\n{SUMMARY_TAG}"
+
     if target:
-        edit_url = f"{list_url}/{target['id']}"
-        requests.patch(edit_url, headers=headers, json={"body": body_with_tag}).raise_for_status()
+        edit_url = f"{base}/issues/comments/{target['id']}"  # ✅ 올바른 경로
+        pr = requests.patch(edit_url, headers=headers, json={"body": body_with_tag})
+        if pr.status_code == 404:
+            # 레어 케이스 폴백: 새 코멘트 작성
+            requests.post(list_url, headers=headers, json={"body": body_with_tag}).raise_for_status()
+        else:
+            pr.raise_for_status()
     else:
         requests.post(list_url, headers=headers, json={"body": body_with_tag}).raise_for_status()
 
 def post_review_summary(body: str):
     upsert_summary_comment(body)
 
-# --- diff 포함 여부 체크 ---
 def _overlaps_hunks(path: str, it: dict, hunks_by_file: dict) -> bool:
+    """이슈가 diff 범위에 포함되는지 체크(인라인 가능 여부)."""
     hunks = hunks_by_file.get(path, [])
     line = it.get("line")
     sline = it.get("start_line")
@@ -333,100 +343,140 @@ def _overlaps_hunks(path: str, it: dict, hunks_by_file: dict) -> bool:
         return any(not (eline < s or e < sline) for (s, e) in hunks)
     return False
 
-# === 요약 마크다운 (배지/표/체크리스트 + Out-of-diff 목록) ===
-def build_summary_markdown(diag: list, issues: list, out_of_diff: list) -> str:
+def post_inline(issues: list, hunks_by_file: dict):
+    """
+    변경 라인(=diff 포함)만 인라인 코멘트로 게시.
+    """
+    url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUM}/comments"
+    headers = {"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+               "Accept":"application/vnd.github+json"}
+
+    posted = 0
+    skipped = []
+    for it in issues[:200]:
+        path = it.get("file")
+        if not path:
+            skipped.append({"reason":"missing path", "item":it})
+            continue
+        if not _overlaps_hunks(path, it, hunks_by_file):
+            continue
+
+        line = it.get("line")
+        sline = it.get("start_line")
+        eline = it.get("end_line", line)
+
+        if not line and not sline:
+            skipped.append({"reason":"missing line", "item":it})
+            continue
+
+        title = f"**{it.get('type','Issue')} ({it.get('severity','minor')})**"
+        reason = it.get("reason","")
+        suggestion = it.get("suggestion","")
+        body = f"{title}\n{reason}\n\n{suggestion}"
+
+        payload = {"body": body, "path": path, "side":"RIGHT", "commit_id": HEAD_SHA}
+        if sline:
+            payload["start_line"] = int(sline)
+            payload["line"] = int(eline)
+        else:
+            payload["line"] = int(line)
+
+        r = requests.post(url, headers=headers, json=payload)
+        if r.status_code == 201:
+            posted += 1
+        else:
+            try: err = r.json()
+            except Exception: err = {"text": r.text}
+            skipped.append({"reason":"github api", "status": r.status_code, "error": err, "payload": payload})
+
+    # 간단한 결과 로그(디버깅용)
+    try:
+        post_summary(
+            "#### Inline post result\n"
+            f"- posted: {posted}\n"
+            f"- skipped: {len(skipped)}\n"
+            + (("\n```json\n" + json.dumps(skipped, ensure_ascii=False, indent=2)[:5500] + "\n```") if skipped else "")
+        )
+    except Exception:
+        pass
+
+# ===== 요약(슬라이드 스타일) =====
+def build_summary_markdown(diag: list, inline_issues: list, out_of_diff: list) -> str:
+    """
+    슬라이드처럼 'Diagnosis → Next Actions → Out-of-diff' 구성.
+    - 룰 설명 하드코딩 없음: diagnosis[].summary가 있으면 그대로 사용.
+    """
     sev_order = {"critical":0, "major":1, "minor":2, "info":3}
     sev_emoji = {"critical":"🛑", "major":"⚠️", "minor":"ℹ️", "info":"📝"}
 
-    total = len(issues) + len(out_of_diff)
-    by_sev = defaultdict(int)
-    by_file = defaultdict(list)
-    for it in issues + out_of_diff:
-        s = (it.get("severity") or "minor").lower()
-        by_sev[s] += 1
-        by_file[it.get("file","?")].append(it)
+    inls = inline_issues or []
+    ood  = out_of_diff or []
+    all_issues = inls + ood
 
+    # 상단 배지
+    by_sev = defaultdict(int)
+    for it in all_issues:
+        by_sev[(it.get("severity") or "minor").lower()] += 1
     badge = " ".join(
         f"{sev_emoji.get(k,'•')} {k.capitalize()}: **{by_sev.get(k,0)}**"
         for k in ("critical","major","minor","info")
     )
 
-    rows = []
-    for f, lst in sorted(by_file.items()):
-        row = {"file": f, "critical":0,"major":0,"minor":0,"info":0}
-        for it in lst:
-            row[(it.get("severity") or "minor").lower()] += 1
-        rows.append(row)
-    table = ["| File | Critical | Major | Minor | Info |",
-             "|---|---:|---:|---:|---:|"]
-    for r in rows:
-        table.append(f"| `{r['file']}` | {r['critical']} | {r['major']} | {r['minor']} | {r['info']} |")
+    # Diagnosis(룰별) — LLM이 준 diagnosis가 우선
+    # 없으면 issues를 type별로 집계
+    if diag:
+        # severity mix를 보강해 주기 위해 issues와 조합
+        issues_by_type = defaultdict(list)
+        for it in all_issues:
+            issues_by_type[it.get("type","Issue")].append(it)
 
-    def issue_label(it):
-        s = (it.get("severity") or "minor").lower()
-        em = sev_emoji.get(s,"•")
-        loc = f"L{it.get('start_line', it.get('line','?'))}"
-        return f"- [ ] {em} **{it.get('type','Issue')}** — `{it.get('file','?')}` {loc} — {it.get('reason','')}"
+        rows = []
+        for d in diag:
+            t = d.get("type","-")
+            arr = issues_by_type.get(t, [])
+            mix = defaultdict(int)
+            for it in arr:
+                mix[(it.get("severity") or "minor").lower()] += 1
+            sev_str = ", ".join(f"{k[:1].upper()}:{mix[k]}" for k in ("critical","major","minor","info") if mix.get(k))
+            summary = d.get("summary","")
+            rows.append(f"- **{t}** — {d.get('count',len(arr))}건" + (f"  _({sev_str})_" if sev_str else "") + (f"\n  · {summary}" if summary else ""))
+        diagnosis_md = "\n".join(rows)
+    else:
+        types = defaultdict(int)
+        for it in all_issues:
+            types[it.get("type","Issue")] += 1
+        diagnosis_md = "\n".join(f"- **{t}** — {c}건" for t, c in sorted(types.items(), key=lambda kv: -kv[1])) or "_요약 없음_"
 
-    issues_sorted = sorted(issues, key=lambda it:(sev_order.get((it.get("severity") or "minor").lower(), 9), it.get("file",""), it.get("line") or it.get("start_line") or 10**9))
-    checklist = "\n".join(issue_label(it) for it in issues_sorted[:80])
+    # Next Actions(체크리스트)
+    def to_item(it):
+        sev = (it.get("severity") or "minor").lower()
+        em  = sev_emoji.get(sev,"•")
+        path = it.get("file","?")
+        loc  = f"L{it.get('start_line', it.get('line','?'))}"
+        why  = it.get("reason","").strip()
+        return f"- [ ] {em} **{it.get('type','Issue')}** — `{path}` {loc}\n      {why}"
 
-    out_list = "\n".join(issue_label(it) for it in out_of_diff[:80]) or "_없음_"
+    actions_sorted = sorted(inls,
+                            key=lambda it:(sev_order.get((it.get("severity") or "minor").lower(), 9),
+                                           it.get("file",""),
+                                           it.get("line") or it.get("start_line") or 10**9))
+    actions_md = "\n".join(to_item(it) for it in actions_sorted[:200]) or "_인라인 이슈 없음_"
 
-    def summarize_diag(diag: list):
-        if not diag: return "_요약 없음_"
-        return "\n".join(f"- **{d.get('type','-')}**: {d.get('count',0)}건 — {d.get('summary','')}" for d in diag)
+    # Out-of-diff
+    out_md = "\n".join(to_item(it) for it in ood[:100]) or "_없음_"
 
-    md = []
-    md.append("## 🤖 LLM Code Review 요약")
-    md.append("")
-    md.append(f"- 총 이슈: **{total}**  |  {badge}")
-    md.append("")
-    md += table
-    md.append("")
-    md.append("### 주요 이슈 체크리스트")
-    md.append(checklist if checklist else "_표시할 이슈 없음_")
-    md.append("")
-    md.append("### Out-of-diff findings (인라인 불가)")
-    md.append(out_list)
-    md.append("")
-    md.append("### 분석 메모")
-    md.append(summarize_diag(diag))
-    return "\n".join(md)
+    return (
+        "## 🧭 LLM Code Review Summary\n\n"
+        f"- 총 이슈: **{len(all_issues)}**  |  {badge}\n\n"
+        "### Diagnosis\n"
+        f"{diagnosis_md}\n\n"
+        "### Next Actions\n"
+        f"{actions_md}\n\n"
+        "### Out-of-diff findings\n"
+        f"{out_md}"
+    )
 
-# === 인라인: 리뷰로 한 번에 제출 ===
-def post_inline_as_review(issues: list):
-    """GitHub Review API로 코멘트를 한 번에 제출 (알림 1회)"""
-    if not issues:
-        return
-    url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUM}/reviews"
-    headers = {"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
-               "Accept":"application/vnd.github+json"}
-
-    comments = []
-    for it in issues[:200]:
-        path = it.get("file"); line = it.get("line"); sline = it.get("start_line"); eline = it.get("end_line") or line
-        if not path or (not line and not sline): 
-            continue
-        title = f"**{it.get('type','Issue')} ({it.get('severity','minor')})**"
-        body  = f"{title}\n{it.get('reason','')}\n\n{it.get('suggestion','')}"
-        entry = {"path": path, "side":"RIGHT", "body": body}
-        if sline:
-            entry["start_line"] = int(sline); entry["line"] = int(eline)
-        else:
-            entry["line"] = int(line)
-        comments.append(entry)
-
-    payload = {"event":"COMMENT", "comments": comments}
-    r = requests.post(url, headers=headers, json=payload)
-    if r.status_code not in (200,201):
-        # 실패하면 개별 코멘트로 폴백
-        url_c = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUM}/comments"
-        for c in comments:
-            c["commit_id"] = HEAD_SHA
-            requests.post(url_c, headers=headers, json=c)
-
-# ===== 섹션 카드 =====
+# ===== 섹션 카드 (참고용) =====
 def extract_plain_code_from_section(section_text: str) -> str:
     lines = section_text.splitlines()
     try:
@@ -499,7 +549,7 @@ def per_file_calls(hunks_by_file):
     if section_cards:
         try:
             post_review_summary(
-                "## 🧩 LLM Code Review (by section)\n"
+                "## 📦 LLM Code Review (by section)\n"
                 + "\n\n---\n\n".join(section_cards)
             )
         except Exception:
@@ -508,11 +558,18 @@ def per_file_calls(hunks_by_file):
     return all_diag, all_issues
 
 # ===== 메인 =====
+def build_payload_all_at_once(hunks_by_file):
+    blocks = []
+    for path, hunks in hunks_by_file.items():
+        for (_, s, e), sec in sections_for_file(path, hunks):
+            blocks.append(sec)
+    return "\n\n".join(blocks)[:MAX_PAYLOAD_CHARS]
+
 def main():
     diff = get_diff_unified0()
     hunks = parse_hunks(diff)
     if not hunks:
-        upsert_summary_comment("## 🤖 LLM Code Review 요약\n변경 섹션이 없어 리뷰를 생략합니다.\n\n" + SUMMARY_TAG)
+        upsert_summary_comment("## 🧭 LLM Code Review Summary\n변경 섹션이 없어 리뷰를 생략합니다.\n\n" + SUMMARY_TAG)
         return
 
     # 파일별로 모으기
@@ -520,6 +577,14 @@ def main():
     for path, st, en in hunks:
         hunks_by_file[path].append((st, en))
 
+    # 섹션 디버그(원하면 SECTIONS_DEBUG=1)
+    if os.getenv("SECTIONS_DEBUG", "0") == "1":
+        body = "### 🔎 Section Debug\n"
+        for p, h in hunks_by_file.items():
+            body += f"- {p}: {h}\n"
+        post_summary(body); return
+
+    # 호출 방식
     if PER_FILE_CALL:
         diag, issues = per_file_calls(hunks_by_file)
     else:
@@ -527,7 +592,7 @@ def main():
         parsed, _raw = call_openai(build_messages(payload))
         diag, issues = parsed.get("diagnosis", []), parsed.get("issues", [])
 
-    # diff 포함/미포함 분리
+    # 인라인 가능 vs 불가 분리
     inline_candidates, out_of_diff = [], []
     for it in issues:
         path = it.get("file")
@@ -536,19 +601,12 @@ def main():
         else:
             out_of_diff.append(it)
 
-    # 인라인: 리뷰 1회 제출
-    post_inline_as_review(inline_candidates)
+    # 인라인 게시(개별 코멘트; 안정성 우선)
+    post_inline(inline_candidates, hunks_by_file)
 
-    # 요약 업서트
+    # 상단 요약 업서트
     summary_md = build_summary_markdown(diag, inline_candidates, out_of_diff)
     upsert_summary_comment(summary_md)
-
-def build_payload_all_at_once(hunks_by_file):
-    blocks = []
-    for path, hunks in hunks_by_file.items():
-        for (_, s, e), sec in sections_for_file(path, hunks):
-            blocks.append(sec)
-    return "\n\n".join(blocks)[:MAX_PAYLOAD_CHARS]
 
 if __name__ == "__main__":
     try:
