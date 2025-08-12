@@ -294,69 +294,61 @@ def build_messages(payload_text: str):
 
 def call_openai(messages):
     model = MODEL
-    use_responses = model.startswith("o4")  # o4, o4-mini
+    use_responses = model.startswith("o4")
 
     if use_responses:
         url = "https://api.openai.com/v1/responses"
-
-        # messages(list[{"role","content"}]) -> Responses 입력 포맷
         def to_responses_input(ms):
             return [
-                {
-                    "role": m["role"],
-                    "content": [
-                        {"type": "input_text", "text": m["content"]}  # <-- 핵심: input_text
-                    ],
-                } for m in ms
+                {"role": m["role"],
+                 "content": [{"type": "input_text", "text": m["content"]}]}
+                for m in ms
             ]
-
-        payload = {
-            "model": model,
-            "input": to_responses_input(messages),
-            "max_output_tokens": 1200,   # temperature 넣지 않기
-        }
+        payload = {"model": model,
+                   "input": to_responses_input(messages),
+                   "max_output_tokens": 1200}
     else:
         url = "https://api.openai.com/v1/chat/completions"
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.2,
-            "max_tokens": 1200,
-        }
+        payload = {"model": model, "messages": messages,
+                   "temperature": 0.2, "max_tokens": 1200}
 
     r = requests.post(url,
         headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-                 "Content-Type": "application/json"},
-        data=json.dumps(payload),
-        timeout=180
-    )
+                 "Content-Type":"application/json"},
+        data=json.dumps(payload), timeout=180)
+
     if r.status_code != 200:
-        print("OpenAI error:", r.status_code, r.text)
+        try: err = r.json()
+        except Exception: err = {"text": r.text}
+        print("OpenAI error:", r.status_code, json.dumps(err, ensure_ascii=False)[:4000])
         r.raise_for_status()
 
     data = r.json()
 
-    # 안전 파싱 (Responses)
+    # 안전 파서
     def extract_text_from_responses(d):
-        if d.get("output_text"):
-            return d["output_text"]
-        for msg in d.get("output", []) or []:
-            for part in msg.get("content", []) or []:
-                if part.get("type") in ("output_text", "summary_text") and "text" in part:
-                    return part["text"]
-        # fallback (예외적 라우팅)
+        if d.get("output_text"): return d["output_text"]
+        try:
+            for msg in d.get("output", []) or []:
+                for part in msg.get("content", []) or []:
+                    if part.get("text"): return part["text"]
+        except Exception: pass
         if d.get("choices"):
             return d["choices"][0]["message"]["content"]
         return json.dumps(d, ensure_ascii=False)
 
-    content = extract_text_from_responses(data) if use_responses else data["choices"][0]["message"]["content"]
+    content = extract_text_from_responses(data) if use_responses \
+              else data["choices"][0]["message"]["content"]
 
     s, e = content.find("{"), content.rfind("}")
     try:
-        return json.loads(content[s:e+1])
+        parsed = json.loads(content[s:e+1])
     except Exception:
-        return {"diagnosis": [], "issues": [], "overall_summary": content}
+        parsed = {"diagnosis": [], "issues": [], "overall_summary": content}
 
+    # ← 원문도 함께 반환
+    return parsed, content
+  
 def post_summary(body: str):
     url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUM}/comments"
     requests.post(url,
@@ -409,33 +401,41 @@ def build_payload_all_at_once(hunks_by_file):
 
 def per_file_calls(hunks_by_file):
     all_issues, all_diag = [], []
-    summaries = []
+    debug_notes = []  # 섹션별 원문 응답 저장
 
     for path, hunks in hunks_by_file.items():
         secs = sections_for_file(path, hunks)
-        if not secs:
-            continue
+        if not secs: continue
+
         batch, size = [], 0
         for (_, s, e), text in secs:
             if size + len(text) > MAX_PAYLOAD_CHARS and batch:
-                res = call_openai(build_messages("\n\n".join(batch)))
-                all_diag += res.get("diagnosis", [])
-                all_issues += res.get("issues", [])
-                if res.get("overall_summary"): summaries.append(f"### {path}\n{res['overall_summary']}")
+                parsed, raw = call_openai(build_messages("\n\n".join(batch)))
+                all_diag += parsed.get("diagnosis", [])
+                all_issues += parsed.get("issues", [])
+                if parsed.get("overall_summary"):
+                    debug_notes.append(f"### {path} ({len(batch)} chunk)\n{parsed['overall_summary']}")
+                else:
+                    debug_notes.append(f"### {path} (RAW)\n```\n{raw[:3000]}\n```")
                 batch, size = [text], len(text)
             else:
                 batch.append(text); size += len(text)
-        if batch:
-            res = call_openai(build_messages("\n\n".join(batch)))
-            all_diag += res.get("diagnosis", [])
-            all_issues += res.get("issues", [])
-            if res.get("overall_summary"): summaries.append(f"### {path}\n{res['overall_summary']}")
 
-    if summaries:
-        try:
-            post_summary("#### Raw summaries (debug)\n" + "\n\n".join(summaries)[:6000])
-        except Exception:
-            pass
+        if batch:
+            parsed, raw = call_openai(build_messages("\n\n".join(batch)))
+            all_diag += parsed.get("diagnosis", [])
+            all_issues += parsed.get("issues", [])
+            if parsed.get("overall_summary"):
+                debug_notes.append(f"### {path} ({len(batch)} chunk)\n{parsed['overall_summary']}")
+            else:
+                debug_notes.append(f"### {path} (RAW)\n```\n{raw[:3000]}\n```")
+
+    # 섹션별 원문/요약을 한 번 더 코멘트
+    try:
+        post_summary("#### 🤖 LLM raw outputs (debug)\n" + "\n\n".join(debug_notes)[:6000])
+    except Exception:
+        pass
+
     return all_diag, all_issues
 
 def main():
