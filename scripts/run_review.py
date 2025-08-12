@@ -440,12 +440,12 @@ def post_inline(issues: list, hunks_by_file: dict):
 
     # 디버그 요약
     try:
-        # post_summary(
-        #     "#### Inline post result\n"
-        #     f"- posted: {posted}\n"
-        #     f"- skipped: {len(skipped)}\n"
-        #     + (("\n```json\n" + json.dumps(skipped, ensure_ascii=False, indent=2)[:5500] + "\n```") if skipped else "")
-        # )
+        post_summary(
+            "#### Inline post result\n"
+            f"- posted: {posted}\n"
+            f"- skipped: {len(skipped)}\n"
+            + (("\n```json\n" + json.dumps(skipped, ensure_ascii=False, indent=2)[:5500] + "\n```") if skipped else "")
+        )
     except Exception:
         pass
 
