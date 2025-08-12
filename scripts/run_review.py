@@ -29,6 +29,30 @@ MAX_PAYLOAD_CHARS     = int(os.getenv("MAX_PAYLOAD_CHARS", "180000"))   # 한 �
 PER_FILE_CALL         = os.getenv("PER_FILE_CALL", "true").lower() == "true"  # 파일 단위로 여러 번 호출
 
 # ===== 유틸 =====
+
+def summarize_sections(hunks_by_file):
+    """LLM 호출 없이 섹션만 계산해서 사람이 보기 좋게 요약"""
+    out = []
+    for path, hunks in hunks_by_file.items():
+        secs = sections_for_file(path, hunks)
+        if not secs:
+            continue
+        out.append(f"## {path}")
+        for (p, s, e), text in secs:
+            # 섹션 크기/프리뷰(첫 줄, 끝 줄)
+            lines = text.splitlines()
+            preview_begin = lines[0] if lines else ""
+            preview_end   = lines[-1] if lines else ""
+            out.append(f"- section: {s}~{e}  (len={len(text)})")
+            out.append(f"  - begin: `{preview_begin[:120]}`")
+            out.append(f"  - end  : `{preview_end[:120]}`")
+    return "\n".join(out) if out else "섹션 없음(변경이 없거나 ctags 미설치)"
+
+def debug_sections_and_exit(hunks_by_file):
+    body = "### 🔎 Section Debug\n" + summarize_sections(hunks_by_file)
+    post_summary(body)   # PR 코멘트로 남김
+
+
 def sh(*cmd: str) -> str:
     return subprocess.check_output(list(cmd), text=True).strip()
 
@@ -398,6 +422,11 @@ def main():
     hunks_by_file = defaultdict(list)
     for path, st, en in hunks:
         hunks_by_file[path].append((st, en))
+        
+  #섹션 디버그 모드
+    if os.getenv("SECTIONS_DEBUG", "0") == "1":
+        debug_sections_and_exit(hunks_by_file)
+        return
 
     if PER_FILE_CALL:
         diag, issues = per_file_calls(hunks_by_file)
