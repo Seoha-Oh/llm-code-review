@@ -168,6 +168,24 @@ def split_with_overlap(start: int, end: int, max_lines=MAX_LINES_PER_SECTION, ov
         if pe == end: break
         cur = max(pe - overlap + 1, pe + 1)
 
+# --- helper: hunk 포함 여부 체크 ---
+def _overlaps_hunks(path: str, it: dict, hunks_by_file: dict) -> bool:
+    hunks = hunks_by_file.get(path, [])
+    line = it.get("line")
+    sline = it.get("start_line")
+    eline = it.get("end_line") or line
+
+    if line:
+        line = int(line)
+        return any(s <= line <= e for (s, e) in hunks)
+
+    if sline and eline:
+        sline = int(sline); eline = int(eline)
+        # 구간과 hunk가 겹치는지
+        return any(not (eline < s or e < sline) for (s, e) in hunks)
+
+    return False
+
 def expand_range_for_decls(path: str,
                            func_start: int,
                            func_end: int,
@@ -357,24 +375,32 @@ def post_summary(body: str):
         json={"body": body}
     ).raise_for_status()
 
-def post_inline(issues: list):
-    """단일/다중 라인 인라인 코멘트 + suggestion 지원"""
+def post_inline(issues: list, hunks_by_file: dict):
     url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUM}/comments"
     headers = {"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
                "Accept":"application/vnd.github+json"}
 
     posted = 0
     skipped = []
+    not_inline = []  # diff 밖(=인라인 불가) 항목 모음
 
     for it in issues[:60]:
         path = it.get("file")
+        if not path:
+            skipped.append({"reason":"missing path", "item":it})
+            continue
+
+        # 🔴 인라인 가능 여부 체크 (diff 포함 라인만 통과)
+        if not _overlaps_hunks(path, it, hunks_by_file):
+            not_inline.append(it)   # 나중에 일반 코멘트로 요약
+            continue
+
         line = it.get("line")
         sline = it.get("start_line")
         eline = it.get("end_line", line)
 
-        # 필수 필드 검증 + 섹션 범위 밖 방지(LLM이 실수하는 경우)
-        if not path or (not line and not sline):
-            skipped.append({"reason":"missing path/line", "item":it})
+        if not line and not sline:
+            skipped.append({"reason":"missing line", "item":it})
             continue
 
         title = f"**{it.get('type','Issue')} ({it.get('severity','minor')})**"
@@ -393,20 +419,33 @@ def post_inline(issues: list):
         if r.status_code == 201:
             posted += 1
         else:
-            try:
-                err = r.json()
-            except Exception:
-                err = {"text": r.text}
+            try: err = r.json()
+            except Exception: err = {"text": r.text}
             skipped.append({"reason":"github api", "status": r.status_code, "error": err, "payload": payload})
 
-    # 결과 요약을 PR 코멘트로 남겨 디버깅
+    # 인라인 불가 이슈는 PR 코멘트로 한 번에 안내
+    if not_inline:
+        try:
+            post_summary(
+                "#### Out-of-diff findings (can’t inline)\n"
+                + "\n".join(
+                    f"- `{it.get('file')}` L{it.get('start_line', it.get('line'))}"
+                    f"{('-L'+str(it['end_line'])) if it.get('start_line') else ''} — "
+                    f"**{it.get('type','Issue')}** ({it.get('severity','minor')}): {it.get('reason','')}"
+                    for it in not_inline
+                )
+            )
+        except Exception:
+            pass
+
+    # 디버그 요약
     try:
-        post_summary(
-            "#### Inline post result\n"
-            f"- posted: {posted}\n"
-            f"- skipped: {len(skipped)}\n"
-            + (("\n```json\n" + json.dumps(skipped, ensure_ascii=False, indent=2)[:5500] + "\n```") if skipped else "")
-        )
+        # post_summary(
+        #     "#### Inline post result\n"
+        #     f"- posted: {posted}\n"
+        #     f"- skipped: {len(skipped)}\n"
+        #     + (("\n```json\n" + json.dumps(skipped, ensure_ascii=False, indent=2)[:5500] + "\n```") if skipped else "")
+        # )
     except Exception:
         pass
 
@@ -522,32 +561,20 @@ def per_file_calls(hunks_by_file):
 
     return all_diag, all_issues
 
-def main():
-    diff = get_diff_unified0()
-    hunks = parse_hunks(diff)
-    if not hunks:
-        post_summary("변경 섹션이 없어 리뷰를 생략합니다.")
-        return
-
-    # 파일별로 모으기
-    hunks_by_file = defaultdict(list)
-    for path, st, en in hunks:
-        hunks_by_file[path].append((st, en))
-        
-  #섹션 디버그 모드
-    if os.getenv("SECTIONS_DEBUG", "0") == "1":
-        debug_sections_and_exit(hunks_by_file)
-        return
-
-    if PER_FILE_CALL:
-        diag, issues = per_file_calls(hunks_by_file)
-        post_summary("### 🤖 LLM Code Review 요약\n" + summarize_diag(diag))
-        post_inline(issues)
-    else:
-        payload = build_payload_all_at_once(hunks_by_file)
-        parsed, raw = call_openai(build_messages(payload))
-        post_summary("### 🤖 LLM Code Review 요약\n" + summarize_diag(parsed.get("diagnosis", [])) +"\n\n---\n" + parsed.get("overall_summary",""))
-        post_inline(parsed.get("issues", []))
+if PER_FILE_CALL:
+    diag, issues = per_file_calls(hunks_by_file)
+    post_summary("### 🤖 LLM Code Review 요약\n" + summarize_diag(diag))
+    post_inline(issues, hunks_by_file)  # hunks_by_file 추가
+else:
+    payload = build_payload_all_at_once(hunks_by_file)
+    parsed, raw = call_openai(build_messages(payload))
+    post_summary(
+        "### 🤖 LLM Code Review 요약\n"
+        + summarize_diag(parsed.get("diagnosis", []))
+        + "\n\n---\n"
+        + parsed.get("overall_summary","")
+    )
+    post_inline(parsed.get("issues", []), hunks_by_file) 
 
 if __name__ == "__main__":
     try:
