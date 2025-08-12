@@ -370,7 +370,7 @@ def build_payload_all_at_once(hunks_by_file):
 
 def per_file_calls(hunks_by_file):
     all_issues, all_diag = [], []
-    texts_for_log = []  # ← 추가
+    summaries = []
 
     for path, hunks in hunks_by_file.items():
         secs = sections_for_file(path, hunks)
@@ -382,25 +382,21 @@ def per_file_calls(hunks_by_file):
                 res = call_openai(build_messages("\n\n".join(batch)))
                 all_diag += res.get("diagnosis", [])
                 all_issues += res.get("issues", [])
-                if res.get("overall_summary"):
-                    texts_for_log.append(f"### {path}\n{res['overall_summary']}")
-                batch = [text]; size = len(text)
+                if res.get("overall_summary"): summaries.append(f"### {path}\n{res['overall_summary']}")
+                batch, size = [text], len(text)
             else:
                 batch.append(text); size += len(text)
         if batch:
             res = call_openai(build_messages("\n\n".join(batch)))
             all_diag += res.get("diagnosis", [])
             all_issues += res.get("issues", [])
-            if res.get("overall_summary"):
-                texts_for_log.append(f"### {path}\n{res['overall_summary']}")
+            if res.get("overall_summary"): summaries.append(f"### {path}\n{res['overall_summary']}")
 
-    # 요약 코멘트에 overall_summary 모음도 덧붙여 보기
-    if texts_for_log:
+    if summaries:
         try:
-            post_summary("#### Raw summaries (debug)\n" + "\n\n".join(texts_for_log)[:6000])
+            post_summary("#### Raw summaries (debug)\n" + "\n\n".join(summaries)[:6000])
         except Exception:
             pass
-
     return all_diag, all_issues
 
 def main():
