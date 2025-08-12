@@ -247,20 +247,22 @@ def call_openai(messages):
 
     if use_responses:
         url = "https://api.openai.com/v1/responses"
-        # messages(list[{"role","content"}]) -> responses 입력 포맷으로 변환
+
+        # messages(list[{"role","content"}]) -> Responses 입력 포맷
         def to_responses_input(ms):
-            items = []
-            for m in ms:
-                items.append({
+            return [
+                {
                     "role": m["role"],
-                    "content": [{"type": "text", "text": m["content"]}]
-                })
-            return items
+                    "content": [
+                        {"type": "input_text", "text": m["content"]}  # <-- 핵심: input_text
+                    ],
+                } for m in ms
+            ]
 
         payload = {
             "model": model,
             "input": to_responses_input(messages),
-            "max_output_tokens": 1200,   # temperature 넣지 말기
+            "max_output_tokens": 1200,   # temperature 넣지 않기
         }
     else:
         url = "https://api.openai.com/v1/chat/completions"
@@ -271,47 +273,33 @@ def call_openai(messages):
             "max_tokens": 1200,
         }
 
-    r = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-            "Content-Type": "application/json",
-        },
+    r = requests.post(url,
+        headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+                 "Content-Type": "application/json"},
         data=json.dumps(payload),
-        timeout=180,
+        timeout=180
     )
-
     if r.status_code != 200:
-        try:
-            print("OpenAI error:", r.status_code, r.json())
-        except Exception:
-            print("OpenAI error text:", r.text)
+        print("OpenAI error:", r.status_code, r.text)
         r.raise_for_status()
 
     data = r.json()
 
-    # ---- 안전 파서 ----
-    def extract_text_from_responses(d: dict) -> str:
+    # 안전 파싱 (Responses)
+    def extract_text_from_responses(d):
         if d.get("output_text"):
             return d["output_text"]
-        # output[*].content[*].text 형태 탐색
-        try:
-            for msg in d.get("output", []) or []:
-                for part in msg.get("content", []) or []:
-                    if part.get("text"):
-                        return part["text"]
-        except Exception:
-            pass
-        # 혹시 choices 경로로 온 경우
-        try:
+        for msg in d.get("output", []) or []:
+            for part in msg.get("content", []) or []:
+                if part.get("type") in ("output_text", "summary_text") and "text" in part:
+                    return part["text"]
+        # fallback (예외적 라우팅)
+        if d.get("choices"):
             return d["choices"][0]["message"]["content"]
-        except Exception:
-            pass
         return json.dumps(d, ensure_ascii=False)
 
     content = extract_text_from_responses(data) if use_responses else data["choices"][0]["message"]["content"]
 
-    # ---- 방어적 JSON 파싱 ----
     s, e = content.find("{"), content.rfind("}")
     try:
         return json.loads(content[s:e+1])
