@@ -5,12 +5,11 @@
 run_review.py
 - PR diff를 함수/메서드 경계 기준 섹션으로 나눠 LLM에 전달
 - 결과를 인라인 코멘트(변경 라인만) + PR 상단 요약(업서트)로 게시
-- 요약 형식: Diagnosis(룰별 집계/요약) → Next Actions(체크리스트) → Out-of-diff
-- 룰 설명 하드코딩 없음(LLM의 diagnosis.summary만 사용)
+- 요약 형식: Diagnosis(카테고리 집계/요약) → Next Actions(체크리스트) → Out-of-diff
 """
 
 import os, re, json, subprocess, requests, pathlib, sys
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 # ===== GitHub / 모델 설정 =====
 REPO = os.getenv("GITHUB_REPOSITORY")
@@ -28,6 +27,42 @@ FUNC_CTX_BEFORE       = int(os.getenv("FUNC_CTX_BEFORE", "16"))
 NUM_CTX_LINES         = int(os.getenv("NUM_CTX_LINES", "6"))
 MAX_PAYLOAD_CHARS     = int(os.getenv("MAX_PAYLOAD_CHARS", "180000"))
 PER_FILE_CALL         = os.getenv("PER_FILE_CALL", "true").lower() == "true"
+
+# ===== 카테고리 집계(중복 출력 방지 핵심) =====
+ORDER = ["Precondition", "Runtime", "Optimization", "Security"]
+SUMMARIES = {
+    "Precondition": "코드 실행 전 입력값·상태·범위·동시성 조건 등을 사전에 검증하는 부분",
+    "Runtime": "실행 중 NPE, 인덱스 범위 오류, 0으로 나눔, 자원 누수, 데드락·레이스 등 안정성 관련 문제",
+    "Optimization": "불필요한 연산·I/O·동기화, 데이터 복사, N+1 쿼리, 부적절한 동기↔비동기 변환 등 성능 비효율",
+    "Security": "시크릿·민감정보 노출, 경로 조작, SQL 인젝션, 안전하지 않은 직렬화/모듈 사용 등 보안 취약점",
+}
+
+def classify(issue_type: str, reason: str) -> str:
+    """개별 이슈를 4개 카테고리 중 하나로 매핑."""
+    t = (issue_type or "").lower()
+    r = (reason or "").lower()
+    txt = t + " " + r
+    if any(k in txt for k in ["secret", "token", "credential", "path traversal", "sql", "injection", "pii", "serialize", "pickle", "jwt", "xss", "csrf"]):
+        return "Security"
+    if any(k in txt for k in ["n+1", "unnecessary io", "copy", "deepcopy", "blocking", "busy loop", "complexity", "async", "synchronous", "inefficient"]):
+        return "Optimization"
+    if any(k in txt for k in ["npe", "nullpointer", "attributeerror", "index", "out_of_bounds", "keyerror", "zero", "divide", "overflow", "leak", "deadlock", "race", "resource"]):
+        return "Runtime"
+    if any(k in txt for k in ["precondition", "validate", "validation", "null check", "range", "bounds", "thread-safety", "input check", "guard"]):
+        return "Precondition"
+    # 기본값: 사전조건(보수적으로 입력검증 부족으로 간주)
+    return "Precondition"
+
+def build_aggregated_diagnosis(issues: list) -> list:
+    """이슈 배열을 카테고리별로 합산하여 딱 4줄만 반환."""
+    counter = Counter()
+    for it in issues or []:
+        cat = classify(it.get("type", ""), it.get("reason", ""))
+        counter[cat] += 1
+    diag = []
+    for cat in ORDER:
+        diag.append({"type": cat, "count": int(counter.get(cat, 0)), "summary": SUMMARIES[cat]})
+    return diag
 
 # --- suggestion helpers ---
 SUGG_RX = re.compile(r"(?s)```suggestion\s*\n(.*?)\n```")
@@ -391,8 +426,8 @@ def post_inline(issues: list, hunks_by_file: dict):
         else:
             continue  # 위치 정보가 없으면 업로드 불가
 
-        r = requests.post(url, headers=headers, json=payload)
-        # 실패해도 조용히 진행(불필요한 디버그 코멘트 제거)
+        requests.post(url, headers=headers, json=payload)
+        # 실패해도 조용히 진행
 
 # ===== 요약(슬라이드 스타일) =====
 def build_summary_markdown(diag: list, inline_issues: list, out_of_diff: list) -> str:
@@ -404,35 +439,27 @@ def build_summary_markdown(diag: list, inline_issues: list, out_of_diff: list) -
     ood  = out_of_diff or []
     all_issues = inls + ood
 
+    # 전체 심각도 배지
     by_sev = defaultdict(int)
     for it in all_issues:
         by_sev[(it.get("severity") or "minor").lower()] += 1
     badge = " ".join(f"{sev_emoji.get(k,'•')} {k.capitalize()}: **{by_sev.get(k,0)}**"
                      for k in ("critical","major","minor","info"))
 
-    if diag:
-        issues_by_type = defaultdict(list)
-        for it in all_issues:
-            issues_by_type[it.get("type","Issue")].append(it)
-        rows = []
-        for d in diag:
-            t = d.get("type","-")
-            arr = issues_by_type.get(t, [])
-            mix = defaultdict(int)
-            for it in arr:
-                mix[(it.get("severity") or "minor").lower()] += 1
-            sev_str = ", ".join(f"{k[:1].upper()}:{mix[k]}" for k in ("critical","major","minor","info") if mix.get(k))
-            summary = d.get("summary","")
-            rows.append(f"- **{t}** — {d.get('count',len(arr))}건"
-                        + (f"  _({sev_str})_" if sev_str else "")
-                        + (f"\n  · {summary}" if summary else ""))
-        diagnosis_md = "\n".join(rows)
-    else:
-        types = defaultdict(int)
-        for it in all_issues:
-            types[it.get("type","Issue")] += 1
-        diagnosis_md = "\n".join(f"- **{t}** — {c}건"
-                                 for t, c in sorted(types.items(), key=lambda kv: -kv[1])) or "_요약 없음_"
+    # Diagnosis: 전달된 diag(집계된 4개)를 사용하고, 카테고리별 심각도 분포를 계산해 표시
+    rows = []
+    for d in (diag or []):
+        cat = d.get("type", "-")
+        arr = [it for it in all_issues if classify(it.get("type",""), it.get("reason","")) == cat]
+        mix = defaultdict(int)
+        for it in arr:
+            mix[(it.get("severity") or "minor").lower()] += 1
+        sev_str = ", ".join(f"{k[:1].upper()}:{mix[k]}" for k in ("critical","major","minor","info") if mix.get(k))
+        summary = d.get("summary","")
+        rows.append(f"- **{cat}** — {d.get('count',0)}건"
+                    + (f"  _({sev_str})_" if sev_str else "")
+                    + (f"\n  · {summary}" if summary else ""))
+    diagnosis_md = "\n".join(rows) if rows else "_요약 없음_"
 
     def to_item(it):
         sev = (it.get("severity") or "minor").lower()
@@ -484,7 +511,7 @@ def format_section_card_md(path: str, s: int, e: int, section_text: str, parsed:
         if (it.get("file") == path) and (
             (it.get("line") and s <= int(it["line"]) <= e) or
             (it.get("start_line") and it.get("end_line") and
-             not (int(it["end_line"]) < s or e < int(it["start_line"])))
+             not (int(it["end_line"]) < s or e < int(it["start_line"])) )
         ):
             issues.append(it)
     if issues:
@@ -513,7 +540,7 @@ def per_file_calls(hunks_by_file):
         for (_, s, e), section_text in secs:
             parsed, _raw = call_openai(build_messages(section_text))
             section_cards.append(format_section_card_md(path, s, e, section_text, parsed))
-            all_diag  += parsed.get("diagnosis", [])
+            # 진단(diag)은 섹션 단위로 중복되므로 요약에 사용하지 않는다. 이슈만 수집.
             all_issues += parsed.get("issues", [])
     if section_cards:
         try:
@@ -550,11 +577,11 @@ def main():
 
     # 호출 방식
     if PER_FILE_CALL:
-        diag, issues = per_file_calls(hunks_by_file)
+        _diag_ignored, issues = per_file_calls(hunks_by_file)
     else:
         payload = build_payload_all_at_once(hunks_by_file)
         parsed, _raw = call_openai(build_messages(payload))
-        diag, issues = parsed.get("diagnosis", []), parsed.get("issues", [])
+        issues = parsed.get("issues", [])
 
     # 인라인 가능 vs 불가 분리
     inline_candidates, out_of_diff = [], []
@@ -562,11 +589,14 @@ def main():
         path = it.get("file")
         (inline_candidates if path and _overlaps_hunks(path, it, hunks_by_file) else out_of_diff).append(it)
 
-    # 인라인 업로드(조용히, 디버그 코멘트 없음)
+    # 인라인 업로드(조용히)
     post_inline(inline_candidates, hunks_by_file)
 
+    # == 카테고리 집계: 여기서 단 한 번만 생성 ==
+    aggregated_diag = build_aggregated_diagnosis(issues)
+
     # 상단 요약 업서트
-    summary_md = build_summary_markdown(diag, inline_candidates, out_of_diff)
+    summary_md = build_summary_markdown(aggregated_diag, inline_candidates, out_of_diff)
     upsert_summary_comment(summary_md)
 
 if __name__ == "__main__":
