@@ -5,7 +5,7 @@
 run_review.py
 - PR diff를 함수/메서드 경계 기준 섹션으로 나눠 LLM에 전달
 - 결과를 인라인 코멘트(변경 라인만) + PR 상단 요약(업서트)로 게시
-- 요약 형식: Diagnosis(카테고리 집계/요약) → Next Actions(체크리스트) → Out-of-diff
+- 요약 형식: Diagnosis(카테고리 집계/요약)만 표시
 """
 
 import os, re, json, subprocess, requests, pathlib, sys
@@ -28,7 +28,7 @@ NUM_CTX_LINES         = int(os.getenv("NUM_CTX_LINES", "6"))
 MAX_PAYLOAD_CHARS     = int(os.getenv("MAX_PAYLOAD_CHARS", "180000"))
 PER_FILE_CALL         = os.getenv("PER_FILE_CALL", "true").lower() == "true"
 
-# ===== 카테고리 집계(중복 출력 방지 핵심) =====
+# ===== 카테고리 집계 =====
 ORDER = ["Precondition", "Runtime", "Optimization", "Security"]
 SUMMARIES = {
     "Precondition": "코드 실행 전 입력값·상태·범위·동시성 조건 등을 사전에 검증하는 부분",
@@ -38,44 +38,59 @@ SUMMARIES = {
 }
 
 def classify(issue_type: str, reason: str) -> str:
-    """개별 이슈를 4개 카테고리 중 하나로 매핑."""
+    """개별 이슈를 4개 카테고리 중 하나로 매핑(한/영 키워드 포함)."""
     t = (issue_type or "").lower()
     r = (reason or "").lower()
     txt = t + " " + r
-    if any(k in txt for k in ["secret", "token", "credential", "path traversal", "sql", "injection", "pii", "serialize", "pickle", "jwt", "xss", "csrf"]):
+
+    # Security
+    if any(k in txt for k in [
+        "secret","token","credential","path traversal","sql","injection","pii","serialize","pickle","jwt","xss","csrf",
+        "비밀","시크릿","토큰","경로 조작","인젝션","민감정보","취약","권한 상승"
+    ]):
         return "Security"
-    if any(k in txt for k in ["n+1", "unnecessary io", "copy", "deepcopy", "blocking", "busy loop", "complexity", "async", "synchronous", "inefficient"]):
+
+    # Optimization
+    if any(k in txt for k in [
+        "n+1","unnecessary io","copy","deepcopy","blocking","busy loop","complexity","async","synchronous","inefficient",
+        "불필요","비효율","과도한 복사","동기화 남용","성능","느림"
+    ]):
         return "Optimization"
-    if any(k in txt for k in ["npe", "nullpointer", "attributeerror", "index", "out_of_bounds", "keyerror", "zero", "divide", "overflow", "leak", "deadlock", "race", "resource"]):
+
+    # Runtime
+    if any(k in txt for k in [
+        "npe","nullpointer","attributeerror","index","out_of_bounds","keyerror","zero","divide","/0","leak","deadlock","race","resource",
+        "0으로","제로","분모 0","나눗셈 오류","인덱스 범위","자원 누수","데드락","레이스"
+    ]):
         return "Runtime"
-    if any(k in txt for k in ["precondition", "validate", "validation", "null check", "range", "bounds", "thread-safety", "input check", "guard"]):
+
+    # Precondition
+    if any(k in txt for k in [
+        "precondition","validate","validation","null check","range","bounds","thread-safety","input check","guard",
+        "mutable default","가변 기본값","기본 인수","입력 검증","범위 검증","동시성 전제","사전조건"
+    ]):
         return "Precondition"
-    # 기본값: 사전조건(보수적으로 입력검증 부족으로 간주)
+
     return "Precondition"
 
 def build_aggregated_diagnosis(issues: list) -> list:
-    """이슈 배열을 카테고리별로 합산하여 딱 4줄만 반환."""
+    """이슈 배열을 카테고리별로 합산하여 4개 항목만 반환."""
     counter = Counter()
     for it in issues or []:
-        cat = classify(it.get("type", ""), it.get("reason", ""))
+        cat = classify(it.get("type",""), it.get("reason",""))
         counter[cat] += 1
-    diag = []
-    for cat in ORDER:
-        diag.append({"type": cat, "count": int(counter.get(cat, 0)), "summary": SUMMARIES[cat]})
-    return diag
+    return [{"type": cat, "count": int(counter.get(cat, 0)), "summary": SUMMARIES[cat]} for cat in ORDER]
 
 # --- suggestion helpers ---
 SUGG_RX = re.compile(r"(?s)```suggestion\s*\n(.*?)\n```")
 
 def _extract_suggestion_block(text: str) -> str:
-    """유효한 ```suggestion ...``` 전체 블록을 돌려주거나 빈 문자열."""
     if not text:
         return ""
     m = SUGG_RX.search(text)
     return m.group(0).strip() if m else ""
 
 def _is_multiline_sugg(block: str) -> bool:
-    """suggestion 블록의 코드 줄 수가 2줄 이상인지."""
     if not block:
         return False
     inner = SUGG_RX.search(block).group(1)
@@ -429,26 +444,24 @@ def post_inline(issues: list, hunks_by_file: dict):
         requests.post(url, headers=headers, json=payload)
         # 실패해도 조용히 진행
 
-# ===== 요약(슬라이드 스타일) =====
+# ===== 요약(Diagnosis만) =====
 def build_summary_markdown(diag: list, inline_issues: list, out_of_diff: list) -> str:
     """Diagnosis만 출력."""
-    sev_emoji = {"critical": "🛑", "major": "⚠️", "minor": "ℹ️", "info": "📝"}
-
+    sev_emoji = {"critical":"🛑", "major":"⚠️", "minor":"ℹ️", "info":"📝"}
     all_issues = (inline_issues or []) + (out_of_diff or [])
 
     # 전체 심각도 배지
     by_sev = defaultdict(int)
     for it in all_issues:
         by_sev[(it.get("severity") or "minor").lower()] += 1
-    badge = " ".join(f"{sev_emoji.get(k, '•')} {k.capitalize()}: **{by_sev.get(k, 0)}**"
-                     for k in ("critical", "major", "minor", "info"))
+    badge = " ".join(f"{sev_emoji.get(k,'•')} {k.capitalize()}: **{by_sev.get(k,0)}**"
+                     for k in ("critical","major","minor","info"))
 
-    # Diagnosis: 전달된 diag(집계된 4개)를 사용
     rows = []
     for d in (diag or []):
-        cat = d.get("type", "-")
-        summary = d.get("summary", "")
-        count = d.get("count", 0)
+        cat = d.get("type","-")
+        summary = d.get("summary","")
+        count = d.get("count",0)
         rows.append(f"- **{cat}** — {count}건\n  · {summary}")
     diagnosis_md = "\n".join(rows) if rows else "_요약 없음_"
 
@@ -503,7 +516,7 @@ def format_section_card_md(path: str, s: int, e: int, section_text: str, parsed:
     return "\n".join(md)
 
 def per_file_calls(hunks_by_file):
-    all_issues, all_diag = [], []
+    all_issues = []
     section_cards = []
     for path, hunks in hunks_by_file.items():
         secs = sections_for_file(path, hunks)
@@ -511,14 +524,13 @@ def per_file_calls(hunks_by_file):
         for (_, s, e), section_text in secs:
             parsed, _raw = call_openai(build_messages(section_text))
             section_cards.append(format_section_card_md(path, s, e, section_text, parsed))
-            # 진단(diag)은 섹션 단위로 중복되므로 요약에 사용하지 않는다. 이슈만 수집.
             all_issues += parsed.get("issues", [])
     if section_cards:
         try:
             post_review_summary("## 📦 LLM Code Review (by section)\n" + "\n\n---\n\n".join(section_cards))
         except Exception:
             pass
-    return all_diag, all_issues
+    return [], all_issues
 
 # ===== 메인 =====
 def build_payload_all_at_once(hunks_by_file):
@@ -560,11 +572,12 @@ def main():
         path = it.get("file")
         (inline_candidates if path and _overlaps_hunks(path, it, hunks_by_file) else out_of_diff).append(it)
 
-    # 인라인 업로드(조용히)
+    # 인라인 업로드
     post_inline(inline_candidates, hunks_by_file)
 
-    # == 카테고리 집계: 여기서 단 한 번만 생성 ==
-    aggregated_diag = build_aggregated_diagnosis(issues)
+    # 화면에 보이는 전체 이슈 기준으로 집계
+    all_issues = inline_candidates + out_of_diff
+    aggregated_diag = build_aggregated_diagnosis(all_issues)
 
     # 상단 요약 업서트
     summary_md = build_summary_markdown(aggregated_diag, inline_candidates, out_of_diff)
