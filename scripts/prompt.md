@@ -34,7 +34,12 @@ Answer in Korean, short and clear. Sort by severity (critical→major→minor), 
 [output]
 Return **JSON only** (no explanations outside JSON). The only code block allowed is the fenced suggestion inside `"suggestion"`.
 {
-  "diagnosis": [ { "type":"string", "count":0, "summary":"string" } ],
+  "diagnosis":  [
+  { "type": "Precondition", "count": 0, "summary": "코드 실행 전 입력값·상태·범위·동시성 조건 등을 사전에 검증하는 부분" },
+  { "type": "Runtime", "count": 0, "summary": "실행 중 NPE, 인덱스 범위 오류, 0으로 나눔, 자원 누수, 데드락·레이스 등 안정성 관련 문제" },
+  { "type": "Optimization", "count": 0, "summary": "불필요한 연산·I/O·동기화, 데이터 복사, N+1 쿼리, 부적절한 동기↔비동기 변환 등 성능 비효율" },
+  { "type": "Security", "count": 0, "summary": "시크릿·민감정보 노출, 경로 조작, SQL 인젝션, 안전하지 않은 직렬화/모듈 사용 등 보안 취약점" }
+],
   "issues": [ { "type":"string", "severity":"minor|major|critical", "file":"string", "line":0, "start_line":0, "end_line":0, "reason":"string", "suggestion":"string" } ],
   "overall_summary":"string"
 }
