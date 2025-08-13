@@ -431,61 +431,32 @@ def post_inline(issues: list, hunks_by_file: dict):
 
 # ===== 요약(슬라이드 스타일) =====
 def build_summary_markdown(diag: list, inline_issues: list, out_of_diff: list) -> str:
-    """'Diagnosis → Next Actions → Out-of-diff' 구성."""
-    sev_order = {"critical":0, "major":1, "minor":2, "info":3}
-    sev_emoji = {"critical":"🛑", "major":"⚠️", "minor":"ℹ️", "info":"📝"}
+    """Diagnosis만 출력."""
+    sev_emoji = {"critical": "🛑", "major": "⚠️", "minor": "ℹ️", "info": "📝"}
 
-    inls = inline_issues or []
-    ood  = out_of_diff or []
-    all_issues = inls + ood
+    all_issues = (inline_issues or []) + (out_of_diff or [])
 
     # 전체 심각도 배지
     by_sev = defaultdict(int)
     for it in all_issues:
         by_sev[(it.get("severity") or "minor").lower()] += 1
-    badge = " ".join(f"{sev_emoji.get(k,'•')} {k.capitalize()}: **{by_sev.get(k,0)}**"
-                     for k in ("critical","major","minor","info"))
+    badge = " ".join(f"{sev_emoji.get(k, '•')} {k.capitalize()}: **{by_sev.get(k, 0)}**"
+                     for k in ("critical", "major", "minor", "info"))
 
-    # Diagnosis: 전달된 diag(집계된 4개)를 사용하고, 카테고리별 심각도 분포를 계산해 표시
+    # Diagnosis: 전달된 diag(집계된 4개)를 사용
     rows = []
     for d in (diag or []):
         cat = d.get("type", "-")
-        arr = [it for it in all_issues if classify(it.get("type",""), it.get("reason","")) == cat]
-        mix = defaultdict(int)
-        for it in arr:
-            mix[(it.get("severity") or "minor").lower()] += 1
-        sev_str = ", ".join(f"{k[:1].upper()}:{mix[k]}" for k in ("critical","major","minor","info") if mix.get(k))
-        summary = d.get("summary","")
-        rows.append(f"- **{cat}** — {d.get('count',0)}건"
-                    + (f"  _({sev_str})_" if sev_str else "")
-                    + (f"\n  · {summary}" if summary else ""))
+        summary = d.get("summary", "")
+        count = d.get("count", 0)
+        rows.append(f"- **{cat}** — {count}건\n  · {summary}")
     diagnosis_md = "\n".join(rows) if rows else "_요약 없음_"
-
-    def to_item(it):
-        sev = (it.get("severity") or "minor").lower()
-        em  = sev_emoji.get(sev,"•")
-        path = it.get("file","?")
-        loc  = f"L{it.get('start_line', it.get('line','?'))}"
-        why  = (it.get("reason","") or "").strip()
-        return f"- [ ] {em} **{it.get('type','Issue')}** — `{path}` {loc}\n      {why}"
-
-    actions_sorted = sorted(inls, key=lambda it: (
-        sev_order.get((it.get("severity") or "minor").lower(), 9),
-        it.get("file",""),
-        it.get("line") or it.get("start_line") or 10**9
-    ))
-    actions_md = "\n".join(to_item(it) for it in actions_sorted[:200]) or "_인라인 이슈 없음_"
-    out_md = "\n".join(to_item(it) for it in ood[:100]) or "_없음_"
 
     return (
         "## 🧭 LLM Code Review Summary\n\n"
         f"- 총 이슈: **{len(all_issues)}**  |  {badge}\n\n"
         "### Diagnosis\n"
-        f"{diagnosis_md}\n\n"
-        "### Next Actions\n"
-        f"{actions_md}\n\n"
-        "### Out-of-diff findings\n"
-        f"{out_md}"
+        f"{diagnosis_md}"
     )
 
 # ===== 섹션 카드(참고) =====
