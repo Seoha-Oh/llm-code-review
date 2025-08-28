@@ -21,7 +21,7 @@ Security: 시크릿/PII 노출, 경로 조작, SQL 인젝션, unsafe 직렬화, 
 단일 라인: "line"
 연속 구간: "start_line" + "end_line"
 비연속 구간은 각각 별도 issue로 분리
-"suggestion"은 반드시 GitHub suggestion 형식의 fenced block(````suggestion`)으로만 제공
+suggestion은 선택사항으로, 제공될 경우 반드시 GitHub suggestion 형식의 fenced block(\``suggestion)으로만 작성할 것.
 같은 원인 중복은 병합. 확신 없으면 보고하지 말 것.
 
 
