@@ -297,21 +297,20 @@ def build_messages(payload_text: str):
 
 def call_openai(messages):
     model = MODEL.strip()
-    use_responses = model.startswith("o4")  # o4, o4-mini만 responses 사용
+    use_responses = model.startswith("o4")  # o4, o4-mini 등만 responses 사용
 
     if use_responses:
         url = "https://api.openai.com/v1/responses"
 
         def to_responses_input(ms):
-            conv = []
-            for m in ms:
-                # user → input_text, 나머지(system/assistant) → text
-                part_type = "input_text" if m["role"] == "user" else "text"
-                conv.append({
+            # 🔴 모든 role(system/user/developer 등)에 대해 input_text 사용
+            return [
+                {
                     "role": m["role"],
-                    "content": [{"type": part_type, "text": m["content"]}],
-                })
-            return conv
+                    "content": [{"type": "input_text", "text": m["content"]}],
+                }
+                for m in ms
+            ]
 
         payload = {
             "model": model,
@@ -329,21 +328,14 @@ def call_openai(messages):
 
     headers = {
         "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-        "Content-Type": "application/json",   # ← 추가
+        "Content-Type": "application/json",
     }
 
+    r = requests.post(url, headers=headers, json=payload, timeout=180)
     try:
-        # data=... 대신 json=... 사용
-        r = requests.post(url, headers=headers, json=payload, timeout=180)
         r.raise_for_status()
     except requests.HTTPError as e:
-        # 에러 본문을 PR 코멘트로도 보이게 하기 (디버깅 편의)
-        body = ""
-        try:
-            body = r.text
-        except Exception:
-            pass
-        raise requests.HTTPError(f"{e} — body={body[:2000]}")
+        raise requests.HTTPError(f"{e} — body={r.text[:2000]}")
 
     data = r.json()
 
