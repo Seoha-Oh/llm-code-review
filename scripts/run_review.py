@@ -296,44 +296,67 @@ def build_messages(payload_text: str):
     ]
 
 def call_openai(messages):
-    model = MODEL
-    use_responses = model.startswith("o4")
+    model = MODEL.strip()
+    use_responses = model.startswith("o4")  # o4, o4-mini만 responses 사용
 
     if use_responses:
         url = "https://api.openai.com/v1/responses"
+
         def to_responses_input(ms):
-            return [
-                {"role": m["role"],
-                 "content": [{"type": "input_text", "text": m["content"]}]}
-                for m in ms
-            ]
-        payload = {"model": model,
-                   "input": to_responses_input(messages),
-                   "max_output_tokens": 1200}
+            conv = []
+            for m in ms:
+                # user → input_text, 나머지(system/assistant) → text
+                part_type = "input_text" if m["role"] == "user" else "text"
+                conv.append({
+                    "role": m["role"],
+                    "content": [{"type": part_type, "text": m["content"]}],
+                })
+            return conv
+
+        payload = {
+            "model": model,
+            "input": to_responses_input(messages),
+            "max_output_tokens": 1200,
+        }
     else:
         url = "https://api.openai.com/v1/chat/completions"
-        payload = {"model": model, "messages": messages,
-                   "temperature": 0.2, "max_tokens": 1200}
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": 1200,
+        }
 
-    r = requests.post(url,
-        headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
-        data=json.dumps(payload), timeout=180)
+    headers = {
+        "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+        "Content-Type": "application/json",   # ← 추가
+    }
 
-    if r.status_code != 200:
-        try: err = r.json()
-        except Exception: err = {"text": r.text}
-        print("OpenAI error:", r.status_code, json.dumps(err, ensure_ascii=False)[:4000])
+    try:
+        # data=... 대신 json=... 사용
+        r = requests.post(url, headers=headers, json=payload, timeout=180)
         r.raise_for_status()
+    except requests.HTTPError as e:
+        # 에러 본문을 PR 코멘트로도 보이게 하기 (디버깅 편의)
+        body = ""
+        try:
+            body = r.text
+        except Exception:
+            pass
+        raise requests.HTTPError(f"{e} — body={body[:2000]}")
 
     data = r.json()
 
     def extract_text_from_responses(d):
-        if d.get("output_text"): return d["output_text"]
+        if d.get("output_text"):
+            return d["output_text"]
         try:
             for msg in d.get("output", []) or []:
                 for part in msg.get("content", []) or []:
-                    if part.get("text"): return part["text"]
-        except Exception: pass
+                    if part.get("text"):
+                        return part["text"]
+        except Exception:
+            pass
         if d.get("choices"):
             return d["choices"][0]["message"]["content"]
         return json.dumps(d, ensure_ascii=False)
